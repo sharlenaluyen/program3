@@ -9,15 +9,22 @@
 #include <string.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <signal.h>
 
 int STATUS = 0; //status of the program
 
 struct iosymbols{
 	char* inputFileName;
 	char* outputFileName;
-	bool process; //whether or not this is a background process
+	bool process; //whether or not this is a background process (if & is included from user input)
 	int index; //where the last arg is so that exec only takes input[0]
 };
+
+bool Zset = false; //boolean for deciding if a signal was sent from CTRL Z
+bool sigstop = false; //boolean for message displays entering/exiting foreground mode
+
+bool Cset = false; //boolean for deciding if a signal was sent from CTRL C
+
 
 int inputSize(char buffer[]){
 	int count = 1; //starts at 1 since array is 0-based
@@ -39,7 +46,7 @@ int inputSize(char buffer[]){
 //look at number of things in command line
 //create array on that number
 //add in things from command line into that array
-void takeInput(int count, char buffer[], char** input, char mypid[]){
+void takeInput(int count, char buffer[], char** input, char mypid[], char dest[]){
 	char* token; 
 	//printf("%d\n", count );
 	token = strtok(buffer, " ");
@@ -61,7 +68,7 @@ void takeInput(int count, char buffer[], char** input, char mypid[]){
 				//int substringlength = strlen(str) - pos; // 7 - 5 = 2
 
 			   //char src[40];//= input[i];
-			   char dest[40];
+			   
 			  
 			   memset(dest, '\0', sizeof(dest));
 			   //strcpy(src, token); //src = input[i]
@@ -85,9 +92,7 @@ void takeInput(int count, char buffer[], char** input, char mypid[]){
 
 	input[count-1] = '\0'; //add NULL terminating character at the end
 				//int i = 0;
-	for(i = 0; i < count; i++){
-		printf("input at %d : %s\n", i, input[i]); fflush(stdout);
-	}
+
 }
 
 void takeinFiles(int count, char* input[], struct iosymbols* fileinput){
@@ -97,6 +102,10 @@ void takeinFiles(int count, char* input[], struct iosymbols* fileinput){
 
 	if(strcmp(input[count-2],"&") == 0){
 		fileinput->process = true; 
+		if(Zset == true){
+			fileinput->process = false;
+		}
+
 		//input[count-2] = '\0'; 
 		fileinput->index = count-2;
 	}
@@ -113,6 +122,7 @@ void takeinFiles(int count, char* input[], struct iosymbols* fileinput){
 		} 
 	}
 
+
 	//printf("output: %s\n input: %s\n", fileinput->outputFileName, fileinput->inputFileName); fflush(stdout);
 	//return fileinput;
 	//command < file > file & \0
@@ -122,6 +132,7 @@ void takeinFiles(int count, char* input[], struct iosymbols* fileinput){
 void exit_(){
 	//kill my shell 
 	//kill all processes
+	exit(STATUS);
 
 }
 
@@ -134,7 +145,7 @@ void cd_(int count, char* input[]){
 	if(count-1 == 1){
 		res = getenv("HOME");
 	} else {
-		printf("%s\n", input[1]);
+		printf("%s\n", input[1]); fflush(stdout);
 		setenv(input[1], input[1], 0); //do not overwrite
 		res = getenv(input[1]);
 	}
@@ -201,7 +212,7 @@ void getPIDs(pid_t* child_pids, int* child_pid_index){
 	}
 }
 
-void setStatus(int* childExitMethod, bool background_process){ //generically sets status
+void setStatus(int* childExitMethod, bool background_process, struct iosymbols* fileinput){ //generically sets status
 	//printf("I'm in setStatus\n"); fflush(stdout);
 		//STATUS = childExitMethod;
 	if (WIFEXITED(*childExitMethod) != 0){ //if we exited normally, then we can continue with the exit status. otherwise, process it through signals
@@ -212,8 +223,9 @@ void setStatus(int* childExitMethod, bool background_process){ //generically set
 		}
 	} else if (WIFSIGNALED(*childExitMethod) != 0){ 
 		//printf("The process was terminated by a signal\n"); fflush(stdout);
-		if(background_process){
-			printf("terminated by signal %d\n", STATUS); fflush(stdout);
+		if(!background_process){
+		//fileinput->process = false;
+		printf("terminated by signal %d\n", STATUS); fflush(stdout);
 		}
 	}
 
@@ -238,10 +250,10 @@ void setPIDs(pid_t * child_pids, int* child_pid_index, int* childExitMethod, str
 	int i = 0;
 	for(i = 0; i < *child_pid_index; i++){
 		//printf("CHILD_PID_INDEX: %d\n", *child_pid_index); fflush(stdout);
-		if(waitpid(child_pids[i], childExitMethod, WNOHANG) != 0){
+		if((waitpid(child_pids[i], childExitMethod, WNOHANG) != 0)){
 			printf("background pid %d is done: ", child_pids[i]); fflush(stdout);
 
-			setStatus(childExitMethod, true);
+			setStatus(childExitMethod, true, fileinput);
 			child_pids[i] = 0;
 		}
 	}
@@ -257,6 +269,7 @@ void commandExecution(int count, char* input[], int* childExitMethod, pid_t* chi
 	//redirect i/o
 
 	pid_t spawnpid = -5;
+	struct sigaction ignore_action = {0};
 	spawnpid = fork(); //makes a whole copy of my program and starts onward as child
 
 	switch (spawnpid){
@@ -265,6 +278,9 @@ void commandExecution(int count, char* input[], int* childExitMethod, pid_t* chi
 		exit(1);
 		break;
 	case 0:		
+		ignore_action.sa_handler = SIG_IGN;
+		sigaction(SIGTSTP, &ignore_action, NULL);
+
 		redirectFiles(input, fileinput);
 
 		int i = 0;
@@ -274,21 +290,29 @@ void commandExecution(int count, char* input[], int* childExitMethod, pid_t* chi
 			}
 		}
 
+	//for(i = 0; i < count; i++){ //count-1 to avoid printing the NULL character at the end
+	//	printf("%s\n", input[i]); fflush(stdout);
+	//}
 		if (execvp(input[0], input) < 0){
-			perror("Cannot be executed.");
+			//printf("%s: ", input[0]);
+			//perror("Cannot be executed.");
 			STATUS = 1;
 			exit(1);
 		}
-
 		break;
 	default:
 	//waitpid here for parent to wait for child to finish
 	//no spawnpid
+					//int i = 0;
+		//printf("fileinput->process: %d\n", fileinput->process); fflush(stdout);
 		if(!fileinput->process){ //foreground
 			waitpid(spawnpid, childExitMethod, 0); //not hanging, forcibly wait for child to terminate
-			setStatus(childExitMethod, fileinput->process);
+			setStatus(childExitMethod, fileinput->process, fileinput);
+			//printf("in command execution in foreground\n"); fflush(stdout);
 		} else { //for background
 			printf("background pid is %d\n", spawnpid); fflush(stdout);
+			//printf("in command execution in background\n"); fflush(stdout);
+
 			child_pids[*child_pid_index] = spawnpid;
 			*child_pid_index += 1;	
 			//setPIDs(child_pids, child_pid_index, &childExitMethod, fileinput);		
@@ -306,34 +330,95 @@ void commandExecution(int count, char* input[], int* childExitMethod, pid_t* chi
 
 }
 
-void printInput(int count, char* input[]){
-	int i = 0;
-	//printf("size of input %ld \t size of char** %ld\n", sizeof(input), sizeof(char**));
-	for(i = 0; i < count-1; i++){ //count-1 to avoid printing the NULL character at the end
-		printf("%s\n", input[i]); fflush(stdout);
-	}
+void catchSIGCHLD(int signo)
+{
+	//char* message = "Caught SIGCHLD, exiting!\n";
+	//write(STDOUT_FILENO, message, 25);
+}
+
+void catchSIGINT(int signo)
+{
+	Cset = !Cset;
+	//if foreground exists
+		//terminate forgeound by itself (not by parent)
+		//if killed, parent print message below
+	//char* message = "terminated by signal ";
+	//char* message1 = signo;
+	//write(STDOUT_FILENO, message, 22);
+	//write(STDOUT_FILENO, signo, 1);
+
+	//raise(SIGCHLD);
+	//sleep(5);
+}
+
+
+
+void catchSIGTSTP(int signo){
+	Zset = !Zset; //switches every time we run it so that we know when we enter and exit foreground mode
+	sigstop = true; //boolean for message displays entering/exiting foreground mode
 }
 
 
 void main(){
 	char buffer[516];
 	memset(buffer, '\0', 516);
+
 	pid_t child_pids[516];
+	memset(child_pids, '\0', 516);
+
 	int child_pid_index = 0;
-	int stat = 0; //status
 	int childExitMethod = -5;
 
 	char mypid[6];
+	char dest[40];
 	memset(mypid, '\0', 6);
+	memset(dest, '\0', 40);
+	char* message;
 	
 	struct iosymbols fileinput;
+	struct sigaction SIGINT_action = {0}, SIGTSTP_action = {0}, SIGCHLD_action = {0};
 
+	//catches signal from ctrl c
+	SIGINT_action.sa_handler = catchSIGINT;
+	sigfillset(&SIGINT_action.sa_mask);
+	SIGINT_action.sa_flags = 0;
+
+	//catches signal from child
+	SIGCHLD_action.sa_handler = catchSIGCHLD;
+	sigfillset(&SIGCHLD_action.sa_mask);
+	SIGCHLD_action.sa_flags = 0;
+
+	//catches signal from crtl z
+	SIGTSTP_action.sa_handler = catchSIGTSTP;
+	sigfillset(&SIGTSTP_action.sa_mask);
+	SIGTSTP_action.sa_flags = 0;
+
+	sigaction(SIGINT, &SIGINT_action, NULL);
+	sigaction(SIGCHLD, &SIGCHLD_action, NULL);
+	sigaction(SIGTSTP, &SIGTSTP_action, NULL);
 
 	while(1){
+		memset(buffer, '\0', 516);
 		fileinput.inputFileName = NULL;
 		fileinput.outputFileName = NULL;
 		fileinput.process = false;
 		fileinput.index = 0;
+		if(Zset == true && sigstop == true){
+			sigstop = false;
+			message = "\nEntering foreground-only mode (& is now ignored)\n"; 
+			write(STDOUT_FILENO, message, 56);
+		} else if(Zset == false && sigstop == true) {
+			sigstop = false;
+			message = "\nExiting foreground-only mode\n"; 
+			write(STDOUT_FILENO, message, 30);
+		}
+
+		if(Cset == true){
+			char* message = "terminated by signal ";
+			write(STDOUT_FILENO, message, 22);
+			printf("%d\n", STATUS);
+			Cset = false;
+		}
 
 		setPIDs(child_pids, &child_pid_index, &childExitMethod, &fileinput);
 
@@ -346,8 +431,8 @@ void main(){
 		char* input[count];
 		memset(input, '\0', count);
 
-		takeInput(count, buffer, input, mypid);
-		int i =0;
+		takeInput(count, buffer, input, mypid, dest);
+
 
 
 /*		printf("%ld\n", sizeof(input)); fflush(stdout);
@@ -385,7 +470,7 @@ void main(){
 
 			takeinFiles(count, input, &fileinput);
 
-
+			//char* temp = input[1];
 			commandExecution(count, input, &childExitMethod, child_pids, &child_pid_index, &fileinput); //whenever this child fork finishes, we know to clean it up
 			//redirectFiles() //redirect inside child process, not parent since this is called after exec in commandExecution
 			
